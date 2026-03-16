@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
+import axios from 'axios'
 import Header from './components/Header'
 import Dashboard from './pages/Dashboard'
 import Signals from './pages/Signals'
@@ -7,13 +8,22 @@ import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
 import Backtest from './pages/Backtest'
 import FactorAnalysis from './pages/FactorAnalysis'
+import PaperTrading from './pages/PaperTrading'
 import useWebSocket from './hooks/useWebSocket'
 
 export default function App() {
   const [prices, setPrices] = useState({ 'XAU/USD': null, 'BTC/USD': null })
+  const prevPricesRef = useRef({ 'XAU/USD': null, 'BTC/USD': null })
   const [liveSignals, setLiveSignals] = useState([])
   const [engineStatus, setEngineStatus] = useState('connecting')
   const { lastMessage, isConnected } = useWebSocket('ws://localhost:8000/ws')
+
+  // Fetch prices immediately on load
+  useEffect(() => {
+    axios.get('/api/prices').then(res => {
+      setPrices(prev => ({ ...prev, ...res.data }))
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     setEngineStatus(isConnected ? 'live' : 'offline')
@@ -23,7 +33,10 @@ export default function App() {
     if (!lastMessage) return
     const msg = lastMessage
     if (msg.type === 'price_update') {
-      setPrices(prev => ({ ...prev, [msg.symbol]: msg.price }))
+      setPrices(prev => {
+        prevPricesRef.current = { ...prev }
+        return { ...prev, [msg.symbol]: msg.price }
+      })
     } else if (msg.type === 'new_signal' || msg.type === 'signal_update') {
       setLiveSignals(prev => {
         const filtered = prev.filter(s => s.symbol !== msg.symbol)
@@ -36,6 +49,7 @@ export default function App() {
     { to: '/', label: 'Dashboard' },
     { to: '/signals', label: 'Signals' },
     { to: '/analytics', label: 'Analytics' },
+    { to: '/paper', label: 'Paper Trading' },
     { to: '/backtest', label: 'Strategy Lab' },
     { to: '/factors', label: 'Factors' },
     { to: '/settings', label: 'Settings' },
@@ -66,9 +80,10 @@ export default function App() {
       </nav>
       <main className="max-w-7xl mx-auto px-4 py-6">
         <Routes>
-          <Route path="/" element={<Dashboard prices={prices} liveSignals={liveSignals} />} />
+          <Route path="/" element={<Dashboard prices={prices} prevPrices={prevPricesRef.current} liveSignals={liveSignals} />} />
           <Route path="/signals" element={<Signals />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/paper" element={<PaperTrading />} />
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/factors" element={<FactorAnalysis />} />
           <Route path="/settings" element={<Settings />} />

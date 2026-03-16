@@ -5,13 +5,13 @@ import SignalList from '../components/SignalList'
 import StatsPanel from '../components/StatsPanel'
 import useSignals from '../hooks/useSignals'
 
-export default function Dashboard({ prices, liveSignals }) {
+export default function Dashboard({ prices, prevPrices, liveSignals }) {
   const { signals, stats, fetchSignals, recordResult } = useSignals()
 
   return (
     <div className="space-y-6">
       {/* Price Strip */}
-      <PriceStrip prices={prices} />
+      <PriceStrip prices={prices} prevPrices={prevPrices || {}} />
 
       {/* Stats */}
       <StatsPanel stats={stats} />
@@ -20,7 +20,7 @@ export default function Dashboard({ prices, liveSignals }) {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Chart */}
         <div className="xl:col-span-2">
-          <TradingChart liveSignals={liveSignals} />
+          <TradingChart liveSignals={liveSignals} prices={prices} />
         </div>
 
         {/* Live Signals */}

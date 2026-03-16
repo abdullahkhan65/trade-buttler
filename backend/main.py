@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
@@ -7,11 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-import database
 import models
 from database import get_db, init_db
 from engine import start_engine, stop_engine, get_engine_status, set_broadcast_callback
-from emailer import send_test_email, send_forming_email, send_confirmed_email
+from emailer import send_test_email
 from data_fetcher import fetch_candles, get_live_price
 from config import SYMBOLS
 
@@ -21,17 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Trade Buttler API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# WebSocket connection manager
+# WebSocket connection manager — defined before lifespan so it can be referenced
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -56,18 +47,29 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect(conn)
 
+
 manager = ConnectionManager()
 
-@app.on_event("startup")
-async def startup_event():
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     init_db()
     set_broadcast_callback(manager.broadcast)
     start_engine()
     logger.info("Trade Buttler started")
-
-@app.on_event("shutdown")
-async def shutdown_event():
+    yield
     stop_engine()
+
+
+app = FastAPI(title="Trade Buttler API", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -150,9 +152,8 @@ def get_stats(db: Session = Depends(get_db)):
         "total_pnl": round(total_pnl, 2),
     }
 
-@app.get("/api/candles/{symbol}")
+@app.get("/api/candles/{symbol:path}")
 def get_candles(symbol: str, interval: str = "1h"):
-    # Decode symbol (BTC%2FUSD -> BTC/USD)
     from urllib.parse import unquote
     symbol = unquote(symbol)
     df = fetch_candles(symbol, interval=interval, limit=200)
@@ -285,7 +286,7 @@ def optimize(body: OptimizeRequest):
 def get_optimize_results():
     return get_all_optimization_results()
 
-@app.get("/api/optimize/params/{symbol}")
+@app.get("/api/optimize/params/{symbol:path}")
 def get_params(symbol: str):
     from urllib.parse import unquote
     symbol = unquote(symbol)
@@ -296,7 +297,50 @@ def get_factors(symbol: Optional[str] = None):
     return analyze_factors(symbol)
 
 
+@app.get("/api/prices")
+def get_prices():
+    """Instant live prices for both symbols — used on page load."""
+    result = {}
+    for sym in SYMBOLS:
+        price = get_live_price(sym)
+        result[sym] = price
+    return result
+
+
 @app.get("/api/health")
 def health():
     status = get_engine_status()
     return {"status": "ok", "engine": status}
+
+
+# ---- Paper Trading endpoints ----
+
+from paper_trader import (
+    get_all_portfolios, get_paper_trades, reset_portfolio, scan_strategy,
+)
+
+@app.get("/api/paper/portfolios")
+def paper_portfolios():
+    return get_all_portfolios()
+
+@app.get("/api/paper/trades")
+def paper_trades_endpoint(strategy_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
+    return get_paper_trades(strategy_id=strategy_id, status=status, limit=limit)
+
+@app.post("/api/paper/reset/{strategy_id}")
+def paper_reset(strategy_id: str):
+    from paper_trader import STRATEGIES
+    if strategy_id not in STRATEGIES:
+        raise HTTPException(status_code=404, detail="Unknown strategy")
+    ok = reset_portfolio(strategy_id)
+    return {"success": ok}
+
+@app.post("/api/paper/scan/{strategy_id}")
+def paper_scan_now(strategy_id: str):
+    """Manually trigger a scan for a specific paper strategy."""
+    from paper_trader import STRATEGIES
+    if strategy_id not in STRATEGIES:
+        raise HTTPException(status_code=404, detail="Unknown strategy")
+    import threading
+    threading.Thread(target=scan_strategy, args=(strategy_id,), daemon=True).start()
+    return {"success": True, "message": f"Scanning {strategy_id}..."}

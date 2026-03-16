@@ -29,3 +29,45 @@ class PriceSnapshot(Base):
     symbol = Column(String, index=True)
     price = Column(Float)
     timestamp = Column(DateTime, server_default=func.now())
+
+
+class PaperTrade(Base):
+    """A virtual trade executed by the autonomous paper trading engine."""
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    strategy_id = Column(String, index=True)   # e.g. "1h_baseline"
+    symbol = Column(String, index=True)
+    timeframe = Column(String)                 # 1h / 15m / 4h
+    direction = Column(String)                 # BUY / SELL
+    entry_price = Column(Float)
+    stop_loss = Column(Float)
+    take_profit = Column(Float)
+    units = Column(Float)                      # position size in asset units
+    risk_usd = Column(Float)                   # dollars at risk
+    status = Column(String, default="open")    # open / closed
+    result = Column(String, nullable=True)     # win / loss
+    exit_price = Column(Float, nullable=True)
+    pnl_usd = Column(Float, nullable=True)
+    score = Column(Integer)
+    reasons = Column(Text)                     # JSON
+    analysis = Column(Text, nullable=True)     # post-trade notes
+    opened_at = Column(DateTime, server_default=func.now())
+    closed_at = Column(DateTime, nullable=True)
+
+
+class PaperPortfolio(Base):
+    """Running balance and stats for each paper trading strategy."""
+    __tablename__ = "paper_portfolio"
+
+    id = Column(Integer, primary_key=True)
+    strategy_id = Column(String, unique=True, index=True)
+    label = Column(String)
+    timeframe = Column(String)
+    balance = Column(Float, default=100.0)
+    initial_balance = Column(Float, default=100.0)
+    peak_balance = Column(Float, default=100.0)
+    total_trades = Column(Integer, default=0)
+    winning_trades = Column(Integer, default=0)
+    losing_trades = Column(Integer, default=0)
+    updated_at = Column(DateTime, server_default=func.now())

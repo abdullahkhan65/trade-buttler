@@ -2,16 +2,17 @@ import React, { useEffect, useRef, useState } from 'react'
 import { createChart, CrosshairMode } from 'lightweight-charts'
 import axios from 'axios'
 
-export default function TradingChart({ liveSignals }) {
+export default function TradingChart({ liveSignals, prices }) {
   const chartContainerRef = useRef(null)
   const chartRef = useRef(null)
   const candleSeriesRef = useRef(null)
   const ema20SeriesRef = useRef(null)
   const ema50SeriesRef = useRef(null)
   const ema200SeriesRef = useRef(null)
+  const lastCandleRef = useRef(null)   // tracks current live candle for tick updates
 
   const [symbol, setSymbol] = useState('XAU/USD')
-  const [interval, setInterval] = useState('1h')
+  const [timeframe, setTimeframe] = useState('1h')
   const [loading, setLoading] = useState(true)
 
   function calcEMA(data, period) {
@@ -20,11 +21,7 @@ export default function TradingChart({ liveSignals }) {
     let ema = null
     for (let i = 0; i < data.length; i++) {
       const close = data[i].close
-      if (ema === null) {
-        ema = close
-      } else {
-        ema = close * k + ema * (1 - k)
-      }
+      ema = ema === null ? close : close * k + ema * (1 - k)
       if (i >= period - 1) {
         result.push({ time: data[i].time, value: parseFloat(ema.toFixed(4)) })
       }
@@ -36,21 +33,22 @@ export default function TradingChart({ liveSignals }) {
     setLoading(true)
     try {
       const encoded = encodeURIComponent(symbol)
-      const res = await axios.get(`/api/candles/${encoded}?interval=${interval}`)
+      const res = await axios.get(`/api/candles/${encoded}?interval=${timeframe}`)
       const candles = res.data
 
       if (candleSeriesRef.current && candles.length > 0) {
         candleSeriesRef.current.setData(candles)
 
-        const ema20 = calcEMA(candles, 20)
-        const ema50 = calcEMA(candles, 50)
-        const ema200 = calcEMA(candles, 200)
+        // Store last candle so live price ticks can update it
+        lastCandleRef.current = { ...candles[candles.length - 1] }
 
+        const ema20  = calcEMA(candles, 20)
+        const ema50  = calcEMA(candles, 50)
+        const ema200 = calcEMA(candles, 200)
         ema20SeriesRef.current?.setData(ema20)
         ema50SeriesRef.current?.setData(ema50)
         ema200SeriesRef.current?.setData(ema200)
 
-        // Plot signal markers
         if (liveSignals && liveSignals.length > 0) {
           const markers = liveSignals
             .filter((s) => s.symbol === symbol)
@@ -71,29 +69,16 @@ export default function TradingChart({ liveSignals }) {
     }
   }
 
+  // ── Chart init (runs once) ────────────────────────────────────────────────
   useEffect(() => {
     if (!chartContainerRef.current) return
 
     const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { color: '#0d1117' },
-        textColor: '#8b949e',
-      },
-      grid: {
-        vertLines: { color: '#1a2030' },
-        horzLines: { color: '#1a2030' },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-      },
-      rightPriceScale: {
-        borderColor: '#1a2030',
-      },
-      timeScale: {
-        borderColor: '#1a2030',
-        timeVisible: true,
-        secondsVisible: false,
-      },
+      layout: { background: { color: '#0d1117' }, textColor: '#8b949e' },
+      grid: { vertLines: { color: '#1a2030' }, horzLines: { color: '#1a2030' } },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: '#1a2030' },
+      timeScale: { borderColor: '#1a2030', timeVisible: true, secondsVisible: false },
       width: chartContainerRef.current.clientWidth,
       height: 420,
     })
@@ -101,36 +86,18 @@ export default function TradingChart({ liveSignals }) {
     chartRef.current = chart
 
     candleSeriesRef.current = chart.addCandlestickSeries({
-      upColor: '#22c55e',
-      downColor: '#ef4444',
+      upColor: '#22c55e', downColor: '#ef4444',
       borderVisible: false,
-      wickUpColor: '#22c55e',
-      wickDownColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
     })
 
-    ema20SeriesRef.current = chart.addLineSeries({
-      color: '#3b82f6',
-      lineWidth: 1,
-      title: 'EMA20',
-    })
-
-    ema50SeriesRef.current = chart.addLineSeries({
-      color: '#f59e0b',
-      lineWidth: 1,
-      title: 'EMA50',
-    })
-
-    ema200SeriesRef.current = chart.addLineSeries({
-      color: '#ffffff',
-      lineWidth: 1,
-      title: 'EMA200',
-      lineStyle: 2,
-    })
+    ema20SeriesRef.current  = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, title: 'EMA20' })
+    ema50SeriesRef.current  = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'EMA50' })
+    ema200SeriesRef.current = chart.addLineSeries({ color: '#ffffff', lineWidth: 1, title: 'EMA200', lineStyle: 2 })
 
     const handleResize = () => {
-      if (chartContainerRef.current) {
+      if (chartContainerRef.current)
         chart.applyOptions({ width: chartContainerRef.current.clientWidth })
-      }
     }
     window.addEventListener('resize', handleResize)
 
@@ -140,17 +107,34 @@ export default function TradingChart({ liveSignals }) {
     }
   }, [])
 
+  // ── Full fetch when symbol / timeframe changes ────────────────────────────
   useEffect(() => {
     fetchAndRender()
-    const refreshInterval = setInterval(fetchAndRender, 60000)
-    return () => clearInterval(refreshInterval)
-  }, [symbol, interval])
+    const id = window.setInterval(fetchAndRender, 60000)
+    return () => window.clearInterval(id)
+  }, [symbol, timeframe])
 
+  // ── Re-draw signal markers when new signal arrives ────────────────────────
   useEffect(() => {
-    if (liveSignals && candleSeriesRef.current) {
-      fetchAndRender()
-    }
+    if (liveSignals && candleSeriesRef.current) fetchAndRender()
   }, [liveSignals])
+
+  // ── Live price tick: update the current candle's H/L/C every ~10s ─────────
+  useEffect(() => {
+    const price = prices?.[symbol]
+    if (!price || !candleSeriesRef.current || !lastCandleRef.current) return
+
+    const last = lastCandleRef.current
+    const updated = {
+      time:  last.time,
+      open:  last.open,
+      high:  Math.max(last.high, price),
+      low:   Math.min(last.low,  price),
+      close: price,
+    }
+    lastCandleRef.current = updated
+    candleSeriesRef.current.update(updated)
+  }, [prices, symbol])
 
   return (
     <div className="chart-container">
@@ -164,7 +148,7 @@ export default function TradingChart({ liveSignals }) {
               className="px-3 py-1.5 rounded text-xs font-mono transition-all"
               style={{
                 background: symbol === sym ? '#c9a84c' : '#1a2030',
-                color: symbol === sym ? '#000' : '#8b949e',
+                color:      symbol === sym ? '#000'    : '#8b949e',
               }}
             >
               {sym}
@@ -176,12 +160,12 @@ export default function TradingChart({ liveSignals }) {
           {['15m', '1h', '4h'].map((tf) => (
             <button
               key={tf}
-              onClick={() => setInterval(tf)}
+              onClick={() => setTimeframe(tf)}
               className="px-3 py-1.5 rounded text-xs font-mono transition-all"
               style={{
-                background: interval === tf ? '#1a2030' : 'transparent',
-                color: interval === tf ? '#c9a84c' : '#8b949e',
-                border: interval === tf ? '1px solid #c9a84c44' : '1px solid transparent',
+                background: timeframe === tf ? '#1a2030' : 'transparent',
+                color:      timeframe === tf ? '#c9a84c' : '#8b949e',
+                border: timeframe === tf ? '1px solid #c9a84c44' : '1px solid transparent',
               }}
             >
               {tf}
