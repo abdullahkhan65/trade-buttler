@@ -75,8 +75,9 @@ class PaperPortfolio(Base):
     # Daily session tracking
     day_start_balance = Column(Float, nullable=True)   # balance at start of today
     last_day_reset = Column(String, nullable=True)     # YYYY-MM-DD
-    daily_profit_target_pct = Column(Float, default=2.0)   # stop new trades at +2%/day
-    daily_risk_limit_pct = Column(Float, default=10.0)     # stop new trades at -10%/day
+    daily_trades = Column(Integer, default=0)          # trades opened today (reset daily)
+    daily_profit_target_pct = Column(Float, default=3.0)   # stop new trades at +3%/day
+    daily_risk_limit_pct = Column(Float, default=5.0)      # stop new trades at -5%/day
 
 
 class DailyAnalysisReport(Base):

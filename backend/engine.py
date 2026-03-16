@@ -156,7 +156,7 @@ def scan_symbol(symbol):
 
         last_signal_state[symbol] = signal_type
 
-        # Auto-enter paper trade for 1h_baseline on confirmed signals
+        # Auto-enter paper trade on confirmed signals (master portfolio)
         if signal_type == "confirmed":
             try:
                 from paper_trader import try_enter_trade

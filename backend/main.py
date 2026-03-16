@@ -324,26 +324,37 @@ def paper_portfolios():
     return get_all_portfolios()
 
 @app.get("/api/paper/trades")
-def paper_trades_endpoint(strategy_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
+def paper_trades_endpoint(strategy_id: Optional[str] = None, status: Optional[str] = None, limit: int = 200):
     return get_paper_trades(strategy_id=strategy_id, status=status, limit=limit)
 
-@app.post("/api/paper/reset/{strategy_id}")
-def paper_reset(strategy_id: str):
-    from paper_trader import STRATEGIES
-    if strategy_id not in STRATEGIES:
-        raise HTTPException(status_code=404, detail="Unknown strategy")
-    ok = reset_portfolio(strategy_id)
+@app.post("/api/paper/reset")
+def paper_reset():
+    ok = reset_portfolio()
     return {"success": ok}
 
 @app.post("/api/paper/scan/{strategy_id}")
 def paper_scan_now(strategy_id: str):
-    """Manually trigger a scan for a specific paper strategy."""
+    """Manually trigger a scan for a specific strategy."""
     from paper_trader import STRATEGIES
     if strategy_id not in STRATEGIES:
         raise HTTPException(status_code=404, detail="Unknown strategy")
     import threading
     threading.Thread(target=scan_strategy, args=(strategy_id,), daemon=True).start()
     return {"success": True, "message": f"Scanning {strategy_id}..."}
+
+@app.post("/api/paper/scan-all")
+def paper_scan_all():
+    """Scan all strategies at once."""
+    from paper_trader import STRATEGIES
+    import threading
+    def _scan_all():
+        for sid in STRATEGIES:
+            try:
+                scan_strategy(sid)
+            except Exception as e:
+                logger.error(f"scan-all error {sid}: {e}")
+    threading.Thread(target=_scan_all, daemon=True).start()
+    return {"success": True, "message": "Scanning all strategies..."}
 
 
 # ---- Daily Analysis endpoints ----
