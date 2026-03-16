@@ -15,7 +15,7 @@ Losing trades get an analysis note. Daily analyzer compares factor win rates.
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy import and_
 from database import SessionLocal
 from models import PaperTrade, PaperPortfolio
@@ -111,9 +111,11 @@ def ensure_portfolios():
                     strategy_id=sid,
                     label=cfg["label"],
                     timeframe=cfg["timeframe"],
-                    balance=100.0,
-                    initial_balance=100.0,
-                    peak_balance=100.0,
+                    balance=500.0,
+                    initial_balance=500.0,
+                    peak_balance=500.0,
+                    day_start_balance=500.0,
+                    last_day_reset=date.today().isoformat(),
                 ))
         db.commit()
     finally:
@@ -124,6 +126,32 @@ def ensure_portfolios():
 
 def _get_portfolio(db, strategy_id):
     return db.query(PaperPortfolio).filter(PaperPortfolio.strategy_id == strategy_id).first()
+
+
+def _check_and_reset_daily(portfolio):
+    """Reset day_start_balance at the start of each new calendar day."""
+    today = date.today().isoformat()
+    if portfolio.last_day_reset != today:
+        portfolio.day_start_balance = portfolio.balance
+        portfolio.last_day_reset = today
+
+
+def _daily_status(portfolio):
+    """
+    Returns (can_trade: bool, reason: str, daily_pnl: float, daily_pnl_pct: float).
+    """
+    day_start = portfolio.day_start_balance or portfolio.balance
+    daily_pnl = portfolio.balance - day_start
+    daily_pnl_pct = (daily_pnl / day_start * 100) if day_start > 0 else 0
+
+    target = getattr(portfolio, 'daily_profit_target_pct', 2.0) or 2.0
+    limit  = getattr(portfolio, 'daily_risk_limit_pct',   10.0) or 10.0
+
+    if daily_pnl_pct >= target:
+        return False, f"daily_target_reached ({daily_pnl_pct:.1f}%)", daily_pnl, daily_pnl_pct
+    if daily_pnl_pct <= -limit:
+        return False, f"daily_risk_limit_hit ({daily_pnl_pct:.1f}%)", daily_pnl, daily_pnl_pct
+    return True, "active", daily_pnl, daily_pnl_pct
 
 
 def _has_open_trade(db, strategy_id, symbol):
@@ -181,18 +209,36 @@ def try_enter_trade(strategy_id, symbol, signal_data, broadcast_fn=None):
         if not portfolio or portfolio.balance <= 1.0:
             return False
 
-        cfg = STRATEGIES[strategy_id]
-        risk_usd = portfolio.balance * (cfg["risk_pct"] / 100.0)
+        # Daily session reset + limit check
+        _check_and_reset_daily(portfolio)
+        can_trade, reason, _, _ = _daily_status(portfolio)
+        if not can_trade:
+            logger.info(f"[Paper] SKIP {strategy_id}/{symbol} — {reason}")
+            db.commit()   # persist the day_start_balance reset if it happened
+            return False
 
-        entry = signal_data["entry_price"]
-        sl    = signal_data["stop_loss"]
-        tp    = signal_data["take_profit"]
+        cfg = STRATEGIES[strategy_id]
+
+        entry   = signal_data["entry_price"]
+        sl      = signal_data["stop_loss"]
+        tp      = signal_data["take_profit"]
         sl_dist = abs(entry - sl)
 
         if sl_dist < 0.0001:
             return False
 
-        units = risk_usd / sl_dist
+        # MT5-style lot size (balance / 100), risk is derived from lot size × SL distance
+        lot_size = round(portfolio.balance / 100.0, 2)
+        units    = lot_size                        # 1 lot = 1 unit of the asset
+        risk_usd = round(units * sl_dist, 4)
+
+        # Cap per-trade risk at 10% of balance (daily risk limit guard)
+        max_risk = portfolio.balance * (getattr(portfolio, 'daily_risk_limit_pct', 10.0) / 100.0)
+        if risk_usd > max_risk:
+            # Scale lots down so risk fits within daily limit
+            units    = round(max_risk / sl_dist, 6)
+            lot_size = round(units, 2)
+            risk_usd = round(units * sl_dist, 4)
 
         trade = PaperTrade(
             strategy_id=strategy_id,
@@ -202,8 +248,9 @@ def try_enter_trade(strategy_id, symbol, signal_data, broadcast_fn=None):
             entry_price=entry,
             stop_loss=sl,
             take_profit=tp,
+            lot_size=lot_size,
             units=round(units, 6),
-            risk_usd=round(risk_usd, 4),
+            risk_usd=risk_usd,
             score=signal_data["score"],
             reasons=json.dumps(signal_data.get("reasons", [])),
             status="open",
@@ -215,7 +262,8 @@ def try_enter_trade(strategy_id, symbol, signal_data, broadcast_fn=None):
 
         logger.info(
             f"[Paper] OPEN  {strategy_id} | {symbol} {signal_data['direction']} "
-            f"@ ${entry:,.2f} | SL ${sl:,.2f} | TP ${tp:,.2f} | Risk ${risk_usd:.2f}"
+            f"@ ${entry:,.2f} | SL ${sl:,.2f} | TP ${tp:,.2f} | "
+            f"Lots {lot_size} | Risk ${risk_usd:.2f}"
         )
 
         if broadcast_fn:
@@ -228,7 +276,8 @@ def try_enter_trade(strategy_id, symbol, signal_data, broadcast_fn=None):
                 "entry_price": entry,
                 "stop_loss": sl,
                 "take_profit": tp,
-                "risk_usd": round(risk_usd, 4),
+                "lot_size": lot_size,
+                "risk_usd": risk_usd,
                 "score": signal_data["score"],
             })
         return True
@@ -360,26 +409,42 @@ def get_all_portfolios():
             roi = ((p.balance - p.initial_balance) / p.initial_balance * 100)
             drawdown = ((p.peak_balance - p.balance) / p.peak_balance * 100) if p.peak_balance > 0 else 0
 
+            # Daily session
+            _check_and_reset_daily(p)
+            can_trade, daily_reason, daily_pnl, daily_pnl_pct = _daily_status(p)
+            day_start = p.day_start_balance or p.balance
+            daily_target_pct = getattr(p, 'daily_profit_target_pct', 2.0) or 2.0
+            daily_risk_pct   = getattr(p, 'daily_risk_limit_pct',   10.0) or 10.0
+
             # Count open trades
             open_count = db.query(PaperTrade).filter(
                 and_(PaperTrade.strategy_id == p.strategy_id, PaperTrade.status == "open")
             ).count()
 
             result.append({
-                "strategy_id": p.strategy_id,
-                "label": p.label,
-                "timeframe": p.timeframe,
-                "balance": round(p.balance, 2),
+                "strategy_id":   p.strategy_id,
+                "label":         p.label,
+                "timeframe":     p.timeframe,
+                "balance":       round(p.balance, 2),
                 "initial_balance": p.initial_balance,
-                "peak_balance": round(p.peak_balance, 2),
-                "roi_pct": round(roi, 2),
-                "drawdown_pct": round(drawdown, 2),
-                "total_trades": p.total_trades,
+                "peak_balance":  round(p.peak_balance, 2),
+                "roi_pct":       round(roi, 2),
+                "drawdown_pct":  round(drawdown, 2),
+                "total_trades":  p.total_trades,
                 "winning_trades": p.winning_trades,
                 "losing_trades": p.losing_trades,
-                "win_rate": round(win_rate, 1),
-                "open_trades": open_count,
+                "win_rate":      round(win_rate, 1),
+                "open_trades":   open_count,
+                "lot_size":      round(p.balance / 100.0, 2),
+                # Daily session
+                "daily_pnl":          round(daily_pnl, 2),
+                "daily_pnl_pct":      round(daily_pnl_pct, 2),
+                "daily_target_pct":   daily_target_pct,
+                "daily_risk_pct":     daily_risk_pct,
+                "day_start_balance":  round(day_start, 2),
+                "daily_status":       "active" if can_trade else daily_reason.split(" (")[0],
             })
+        db.commit()   # persist any day_start_balance resets
         return result
     finally:
         db.close()
@@ -395,26 +460,27 @@ def get_paper_trades(strategy_id=None, status=None, limit=100):
             q = q.filter(PaperTrade.status == status)
         trades = q.limit(limit).all()
         return [{
-            "id": t.id,
+            "id":          t.id,
             "strategy_id": t.strategy_id,
-            "label": STRATEGIES.get(t.strategy_id, {}).get("label", t.strategy_id),
-            "symbol": t.symbol,
-            "timeframe": t.timeframe,
-            "direction": t.direction,
+            "label":       STRATEGIES.get(t.strategy_id, {}).get("label", t.strategy_id),
+            "symbol":      t.symbol,
+            "timeframe":   t.timeframe,
+            "direction":   t.direction,
             "entry_price": t.entry_price,
-            "stop_loss": t.stop_loss,
+            "stop_loss":   t.stop_loss,
             "take_profit": t.take_profit,
-            "units": t.units,
-            "risk_usd": t.risk_usd,
-            "status": t.status,
-            "result": t.result,
-            "exit_price": t.exit_price,
-            "pnl_usd": t.pnl_usd,
-            "score": t.score,
-            "reasons": json.loads(t.reasons) if t.reasons else [],
-            "analysis": t.analysis,
-            "opened_at": t.opened_at.isoformat() if t.opened_at else None,
-            "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "lot_size":    t.lot_size,
+            "units":       t.units,
+            "risk_usd":    t.risk_usd,
+            "status":      t.status,
+            "result":      t.result,
+            "exit_price":  t.exit_price,
+            "pnl_usd":     t.pnl_usd,
+            "score":       t.score,
+            "reasons":     json.loads(t.reasons) if t.reasons else [],
+            "analysis":    t.analysis,
+            "opened_at":   t.opened_at.isoformat() if t.opened_at else None,
+            "closed_at":   t.closed_at.isoformat() if t.closed_at else None,
         } for t in trades]
     finally:
         db.close()
@@ -427,8 +493,10 @@ def reset_portfolio(strategy_id):
         db.query(PaperTrade).filter(PaperTrade.strategy_id == strategy_id).delete()
         portfolio = _get_portfolio(db, strategy_id)
         if portfolio:
-            portfolio.balance = 100.0
-            portfolio.peak_balance = 100.0
+            portfolio.balance = 500.0
+            portfolio.peak_balance = 500.0
+            portfolio.day_start_balance = 500.0
+            portfolio.last_day_reset = date.today().isoformat()
             portfolio.total_trades = 0
             portfolio.winning_trades = 0
             portfolio.losing_trades = 0

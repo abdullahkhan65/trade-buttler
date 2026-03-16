@@ -43,6 +43,7 @@ class PaperTrade(Base):
     entry_price = Column(Float)
     stop_loss = Column(Float)
     take_profit = Column(Float)
+    lot_size = Column(Float, nullable=True)    # MT5-style lots (balance/100)
     units = Column(Float)                      # position size in asset units
     risk_usd = Column(Float)                   # dollars at risk
     status = Column(String, default="open")    # open / closed
@@ -64,13 +65,18 @@ class PaperPortfolio(Base):
     strategy_id = Column(String, unique=True, index=True)
     label = Column(String)
     timeframe = Column(String)
-    balance = Column(Float, default=100.0)
-    initial_balance = Column(Float, default=100.0)
-    peak_balance = Column(Float, default=100.0)
+    balance = Column(Float, default=500.0)
+    initial_balance = Column(Float, default=500.0)
+    peak_balance = Column(Float, default=500.0)
     total_trades = Column(Integer, default=0)
     winning_trades = Column(Integer, default=0)
     losing_trades = Column(Integer, default=0)
     updated_at = Column(DateTime, server_default=func.now())
+    # Daily session tracking
+    day_start_balance = Column(Float, nullable=True)   # balance at start of today
+    last_day_reset = Column(String, nullable=True)     # YYYY-MM-DD
+    daily_profit_target_pct = Column(Float, default=2.0)   # stop new trades at +2%/day
+    daily_risk_limit_pct = Column(Float, default=10.0)     # stop new trades at -10%/day
 
 
 class DailyAnalysisReport(Base):

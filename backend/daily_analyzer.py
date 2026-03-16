@@ -47,10 +47,10 @@ def analyze_trades():
     try:
         trades = db.query(PaperTrade).filter(PaperTrade.status == "closed").all()
 
-        if len(trades) < 3:
+        if len(trades) < 5:
             return {
                 "status": "insufficient_data",
-                "message": f"Only {len(trades)} closed trades — need at least 3 for meaningful analysis.",
+                "message": f"Only {len(trades)} closed trades — need at least 5 for meaningful analysis.",
                 "total_trades": len(trades),
                 "insights": [],
                 "recommendations": [],
@@ -111,7 +111,7 @@ def analyze_trades():
 
         for cat, s in factor_stats.items():
             total = s["wins"] + s["losses"]
-            if total >= 2:
+            if total >= 3:
                 report["factor_data"][cat] = {
                     "occurrences": total,
                     "wins":        s["wins"],
@@ -144,7 +144,8 @@ def analyze_trades():
 
         # ── Generate insights ─────────────────────────────────────────────────
         insights = []
-        insights.append(f"Overall: {len(trades)} closed trades — {overall_wr:.0f}% win rate")
+        sample_note = " (small sample — need 20+ for reliable conclusions)" if len(trades) < 20 else ""
+        insights.append(f"Overall: {len(trades)} closed trades — {overall_wr:.0f}% win rate{sample_note}")
 
         # Best / worst strategy
         ranked = sorted(report["strategy_data"].items(), key=lambda x: x[1]["win_rate"], reverse=True)
@@ -173,7 +174,7 @@ def analyze_trades():
 
         # Top factors
         top_factors = sorted(
-            [(k, v) for k, v in report["factor_data"].items() if v["occurrences"] >= 2],
+            [(k, v) for k, v in report["factor_data"].items() if v["occurrences"] >= 5],
             key=lambda x: x[1]["win_rate"], reverse=True
         )
         if top_factors:
@@ -189,37 +190,38 @@ def analyze_trades():
         # ── Generate recommendations ──────────────────────────────────────────
         recs = []
 
-        if overall_wr < 40 and len(trades) >= 5:
+        if overall_wr < 40 and len(trades) >= 15:
             recs.append(
-                "Win rate below 40% — run Strategy Lab optimizer on both symbols to recalibrate "
+                "Win rate below 40% over 15+ trades — run Strategy Lab optimizer to recalibrate "
                 "RSI zones and EMA separation thresholds"
             )
-        elif overall_wr >= 65:
-            recs.append("Win rate above 65% — system is performing well. Maintain current parameters.")
+        elif overall_wr >= 65 and len(trades) >= 10:
+            recs.append("Win rate above 65% over 10+ trades — system performing well. Maintain current parameters.")
 
-        # Recommend pausing losing direction
+        # Recommend pausing losing direction (need 8+ trades to be meaningful)
         for d, dd in report["direction_data"].items():
-            if dd["total"] >= 4 and dd["win_rate"] < 30:
+            if dd["total"] >= 8 and dd["win_rate"] < 30:
                 recs.append(
                     f"PAUSE {d} signals — only {dd['win_rate']}% win rate over {dd['total']} trades. "
                     f"Market structure likely opposes {d} entries currently."
                 )
 
-        # Factor-level recommendations
+        # Factor recommendations need 8+ occurrences before drawing conclusions
         for cat, s in report["factor_data"].items():
-            if s["occurrences"] >= 3 and s["win_rate"] <= 30:
+            if s["occurrences"] >= 8 and s["win_rate"] <= 30:
                 recs.append(
-                    f"'{cat}' condition has only {s['win_rate']}% win rate — "
+                    f"'{cat}' has only {s['win_rate']}% win rate over {s['occurrences']} trades — "
                     f"consider removing it from scoring or reducing its weight"
                 )
-            elif s["occurrences"] >= 3 and s["win_rate"] >= 80:
+            elif s["occurrences"] >= 8 and s["win_rate"] >= 80:
                 recs.append(
-                    f"'{cat}' is a strong predictor ({s['win_rate']}% win rate) — "
+                    f"'{cat}' is a strong predictor ({s['win_rate']}% win rate, {s['occurrences']} trades) — "
                     f"consider requiring it as a mandatory condition"
                 )
 
-        # Score threshold recommendation
-        if sd["avg_win_score"] and sd["avg_loss_score"] and sd["avg_win_score"] > sd["avg_loss_score"] + 1:
+        # Score threshold recommendation (need 10+ trades)
+        if len(trades) >= 10 and sd["avg_win_score"] and sd["avg_loss_score"] and \
+                sd["avg_win_score"] > sd["avg_loss_score"] + 1:
             threshold = round(sd["avg_win_score"] - 0.5)
             recs.append(
                 f"Winning trades average {sd['avg_win_score']:.1f}/9 vs losing {sd['avg_loss_score']:.1f}/9 — "
