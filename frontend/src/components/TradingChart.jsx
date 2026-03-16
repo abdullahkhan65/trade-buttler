@@ -49,6 +49,9 @@ export default function TradingChart({ liveSignals, prices }) {
         ema50SeriesRef.current?.setData(ema50)
         ema200SeriesRef.current?.setData(ema200)
 
+        // Always scroll to the latest candle after loading data
+        chartRef.current?.timeScale().scrollToRealTime()
+
         if (liveSignals && liveSignals.length > 0) {
           const markers = liveSignals
             .filter((s) => s.symbol === symbol)
@@ -134,6 +137,7 @@ export default function TradingChart({ liveSignals, prices }) {
     }
     lastCandleRef.current = updated
     candleSeriesRef.current.update(updated)
+    chartRef.current?.timeScale().scrollToRealTime()
   }, [prices, symbol])
 
   return (
