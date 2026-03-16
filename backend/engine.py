@@ -207,6 +207,22 @@ def _restore_signal_states():
         db.close()
 
 
+def _run_analysis():
+    """Wrapper so daily_analyzer errors don't crash the scheduler."""
+    try:
+        from daily_analyzer import analyze_trades
+        report = analyze_trades()
+        if report.get("status") != "insufficient_data":
+            broadcast({
+                "type": "analysis_complete",
+                "insights": report.get("insights", []),
+                "recommendations": report.get("recommendations", []),
+            })
+            logger.info(f"[Analyzer] Done — {len(report.get('insights', []))} insights generated")
+    except Exception as e:
+        logger.error(f"[Analyzer] Error: {e}")
+
+
 def start_engine():
     from paper_trader import ensure_portfolios, scan_strategy
 
@@ -233,7 +249,7 @@ def start_engine():
         max_instances=1,
     )
 
-    # 15m aggressive paper strategy — scan every 5 minutes
+    # 15m aggressive — scan every 5 minutes
     scheduler.add_job(
         lambda: scan_strategy("15m_aggressive", broadcast),
         trigger=IntervalTrigger(minutes=5),
@@ -242,7 +258,7 @@ def start_engine():
         max_instances=1,
     )
 
-    # 4h conservative paper strategy — scan every 30 minutes
+    # 4h conservative — scan every 30 minutes
     scheduler.add_job(
         lambda: scan_strategy("4h_conservative", broadcast),
         trigger=IntervalTrigger(minutes=30),
@@ -251,7 +267,25 @@ def start_engine():
         max_instances=1,
     )
 
-    # One-shot first scan 5s after startup (lets server bind first)
+    # XAU Fibonacci + Smart Money — scan every 15 minutes (1H strategy)
+    scheduler.add_job(
+        lambda: [scan_strategy(s, broadcast) for s in ("xau_fibonacci", "xau_structure")],
+        trigger=IntervalTrigger(minutes=15),
+        id="paper_scan_xau_advanced",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Daily learning analysis — runs every 6 hours
+    scheduler.add_job(
+        _run_analysis,
+        trigger=IntervalTrigger(hours=6),
+        id="daily_analysis",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # One-shot first scan 5s after startup
     scheduler.add_job(
         run_scan,
         trigger=DateTrigger(run_date=datetime.now() + timedelta(seconds=5)),

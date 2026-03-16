@@ -1,15 +1,17 @@
 """
 Autonomous Paper Trading Engine
 ================================
-Runs 3 strategies simultaneously, each starting with $100 virtual balance.
+Runs 5 strategies simultaneously, each starting with $100 virtual balance:
 
-  1h_baseline    — 1H candles, standard thresholds (score ≥ 8 confirmed)
-  4h_conservative— 4H candles, tighter thresholds (score ≥ 8 confirmed)
-  15m_aggressive — 15M candles, looser thresholds  (score ≥ 7 confirmed)
+  1h_baseline     — 1H multi-confluence (score ≥ 8)
+  4h_conservative — 4H multi-confluence (score ≥ 8)
+  15m_aggressive  — 15M multi-confluence (score ≥ 7)
+  xau_fibonacci   — 1H Fibonacci retracement, XAU only (score ≥ 7)
+  xau_structure   — 1H Order Blocks + Liquidity Sweeps, XAU only (score ≥ 7)
 
-Each confirmed signal auto-enters a trade.  Risk is 2% of current balance.
+Each confirmed signal auto-enters a trade. Risk is 2% of current balance.
 SL/TP is checked every ~10 seconds via the price ticker.
-Losing trades get an analysis note logged to the DB for review.
+Losing trades get an analysis note. Daily analyzer compares factor win rates.
 """
 import json
 import logging
@@ -17,7 +19,7 @@ from datetime import datetime
 from sqlalchemy import and_
 from database import SessionLocal
 from models import PaperTrade, PaperPortfolio
-from data_fetcher import fetch_candles, get_live_price
+from data_fetcher import fetch_candles
 from strategy import analyze_signal
 from config import SYMBOLS
 
@@ -30,6 +32,8 @@ STRATEGIES = {
         "label": "1H Baseline",
         "timeframe": "1h",
         "risk_pct": 2.0,
+        "analyzer": "analyze_signal",
+        "symbols": None,            # None = all symbols
         "params": {
             "min_score_forming": 6,
             "min_score_confirmed": 8,
@@ -42,6 +46,8 @@ STRATEGIES = {
         "label": "4H Conservative",
         "timeframe": "4h",
         "risk_pct": 2.0,
+        "analyzer": "analyze_signal",
+        "symbols": None,
         "params": {
             "min_score_forming": 7,
             "min_score_confirmed": 8,
@@ -54,12 +60,41 @@ STRATEGIES = {
         "label": "15M Aggressive",
         "timeframe": "15m",
         "risk_pct": 1.5,
+        "analyzer": "analyze_signal",
+        "symbols": None,
         "params": {
             "min_score_forming": 5,
             "min_score_confirmed": 7,
             "rsi_buy_low": 42,  "rsi_buy_high": 65,
             "rsi_sell_low": 35, "rsi_sell_high": 58,
             "atr_sl_mult": 1.2, "atr_tp_mult": 2.5,
+        },
+    },
+    # ── XAU/USD-specific strategies ───────────────────────────────────────────
+    "xau_fibonacci": {
+        "label": "XAU Fibonacci",
+        "timeframe": "1h",
+        "risk_pct": 2.0,
+        "analyzer": "analyze_fibonacci",
+        "symbols": ["XAU/USD"],     # gold only
+        "params": {
+            "min_score_forming": 5,
+            "min_score_confirmed": 7,
+            "atr_sl_mult": 1.5,
+            "atr_tp_mult": 3.5,
+        },
+    },
+    "xau_structure": {
+        "label": "XAU Smart Money",
+        "timeframe": "1h",
+        "risk_pct": 2.0,
+        "analyzer": "analyze_orderblock_liquidity",
+        "symbols": ["XAU/USD"],     # gold only
+        "params": {
+            "min_score_forming": 5,
+            "min_score_confirmed": 7,
+            "atr_sl_mult": 1.2,
+            "atr_tp_mult": 3.0,
         },
     },
 }
@@ -286,17 +321,27 @@ def check_and_close_trades(symbol, current_price, broadcast_fn=None):
 
 def scan_strategy(strategy_id, broadcast_fn=None):
     """
-    Full scan for a strategy — fetch candles, run strategy analysis,
-    enter paper trade if confirmed signal found.
-    Called directly for 15m and 4h strategies on their own schedule.
+    Full scan for a strategy — fetch candles, run the strategy's analyzer,
+    and enter a paper trade if a confirmed signal is found.
     """
-    cfg = STRATEGIES[strategy_id]
-    for symbol in SYMBOLS:
+    from strategy import analyze_fibonacci, analyze_orderblock_liquidity
+
+    _analyzers = {
+        "analyze_signal":              analyze_signal,
+        "analyze_fibonacci":           analyze_fibonacci,
+        "analyze_orderblock_liquidity": analyze_orderblock_liquidity,
+    }
+
+    cfg         = STRATEGIES[strategy_id]
+    analyzer_fn = _analyzers.get(cfg.get("analyzer", "analyze_signal"), analyze_signal)
+    symbols     = cfg.get("symbols") or SYMBOLS   # None → all symbols
+
+    for symbol in symbols:
         try:
             df = fetch_candles(symbol, interval=cfg["timeframe"], limit=210)
             if df is None:
                 continue
-            signal_data = analyze_signal(df, symbol, cfg["params"])
+            signal_data = analyzer_fn(df, symbol, cfg["params"])
             if signal_data:
                 try_enter_trade(strategy_id, symbol, signal_data, broadcast_fn)
         except Exception as e:

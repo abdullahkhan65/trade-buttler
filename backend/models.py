@@ -71,3 +71,17 @@ class PaperPortfolio(Base):
     winning_trades = Column(Integer, default=0)
     losing_trades = Column(Integer, default=0)
     updated_at = Column(DateTime, server_default=func.now())
+
+
+class DailyAnalysisReport(Base):
+    """Auto-generated trade analysis report — produced every 6 hours."""
+    __tablename__ = "daily_analysis_reports"
+
+    id = Column(Integer, primary_key=True)
+    report_date = Column(String)        # YYYY-MM-DD HH:MM
+    total_trades = Column(Integer)
+    insights = Column(Text)             # JSON list of insight strings
+    recommendations = Column(Text)      # JSON list of recommendation strings
+    strategy_data = Column(Text)        # JSON dict — per-strategy performance
+    factor_data = Column(Text)          # JSON dict — per-factor win rates
+    created_at = Column(DateTime, server_default=func.now())

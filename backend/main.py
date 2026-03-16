@@ -52,7 +52,7 @@ manager = ConnectionManager()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     init_db()
     set_broadcast_callback(manager.broadcast)
     start_engine()
@@ -344,3 +344,26 @@ def paper_scan_now(strategy_id: str):
     import threading
     threading.Thread(target=scan_strategy, args=(strategy_id,), daemon=True).start()
     return {"success": True, "message": f"Scanning {strategy_id}..."}
+
+
+# ---- Daily Analysis endpoints ----
+
+from daily_analyzer import analyze_trades, get_latest_report, get_all_reports
+
+@app.get("/api/analysis/latest")
+def analysis_latest():
+    report = get_latest_report()
+    if not report:
+        return {"status": "no_data", "message": "No analysis reports yet. Run analysis to generate one."}
+    return report
+
+@app.get("/api/analysis/history")
+def analysis_history(limit: int = 20):
+    return get_all_reports(limit=limit)
+
+@app.post("/api/analysis/run")
+def analysis_run_now():
+    """Manually trigger a full analysis pass."""
+    import threading
+    threading.Thread(target=analyze_trades, daemon=True).start()
+    return {"success": True, "message": "Analysis started — refresh in a few seconds."}
